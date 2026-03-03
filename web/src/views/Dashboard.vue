@@ -28,6 +28,11 @@ const logContainer = ref<HTMLElement | null>(null)
 const autoScroll = ref(true)
 const lastBagFetchAt = ref(0)
 
+// ========== 农场操作预览 ==========
+const landsPreview = ref<any>(null)
+const lastLandsFetchAt = ref(0)
+const localMatureCountdowns = ref<Record<number, number>>({})
+
 const allLogs = computed(() => {
   const sLogs = statusLogs.value || []
   // 操作日志直接按时间排序展示，不再混入 accountLogs（系统日志），避免合并后又 filter 掉的无效操作
@@ -193,6 +198,14 @@ function updateCountdowns() {
     nextFriendCheck.value = isConnected ? '巡查中...' : '--'
   }
 
+  // 土地成熟倒计时递减
+  const cd = localMatureCountdowns.value
+  for (const key of Object.keys(cd)) {
+    const k = Number(key)
+    const v = cd[k] ?? 0
+    if (v > 0) cd[k] = v - 1
+  }
+
   // 集成体验卡倒计时
   updateTrialCountdown()
 }
@@ -300,6 +313,73 @@ async function refreshBag(force = false) {
   await bagStore.fetchBag(currentAccountId.value)
 }
 
+// 获取土地预览数据
+async function fetchLandsPreview(force = false) {
+  if (!currentAccountId.value)
+    return
+  if (!currentAccount.value?.running)
+    return
+  if (!status.value?.connection?.connected)
+    return
+
+  const now = Date.now()
+  if (!force && now - lastLandsFetchAt.value < 15000)
+    return
+  lastLandsFetchAt.value = now
+
+  try {
+    const res = await api.get('/api/lands', {
+      headers: { 'x-account-id': currentAccountId.value },
+    })
+    if (res.data?.ok) {
+      landsPreview.value = res.data.data
+      // 同步倒计时到本地
+      const cd: Record<number, number> = {}
+      for (const land of (res.data.data?.lands || [])) {
+        if (land.matureInSec > 0) {
+          cd[land.id] = land.matureInSec
+        }
+      }
+      localMatureCountdowns.value = cd
+    }
+  }
+  catch {
+    // 静默失败，不影响主流程
+  }
+}
+
+// 格式化成熟倒计时
+function formatMatureTime(seconds: number) {
+  if (seconds <= 0)
+    return '可收获'
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  const s = Math.floor(seconds % 60)
+  if (h > 0)
+    return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
+// 土地状态对应样式
+function getLandStatusClass(land: any) {
+  if (land.status === 'harvestable')
+    return 'bg-green-50 border-green-200 dark:bg-green-900/20 dark:border-green-800/40'
+  if (land.status === 'dead')
+    return 'bg-red-50 border-red-200 dark:bg-red-900/20 dark:border-red-800/40'
+  if (land.status === 'empty')
+    return 'bg-gray-50 border-gray-200 dark:bg-gray-700/20 dark:border-gray-600/40'
+  if (land.needWater || land.needWeed || land.needBug)
+    return 'bg-orange-50 border-orange-200 dark:bg-orange-900/20 dark:border-orange-800/40'
+  return 'bg-blue-50 border-blue-200 dark:bg-blue-900/10 dark:border-blue-800/30'
+}
+
+// 已解锁土地列表
+const unlockedLands = computed(() => {
+  if (!landsPreview.value?.lands)
+    return []
+  return landsPreview.value.lands.filter((l: any) => l.unlocked)
+})
+
 async function refresh() {
   if (currentAccountId.value) {
     const acc = currentAccount.value
@@ -323,6 +403,8 @@ async function refresh() {
 
     // 仅在账号已运行且连接就绪后拉背包，避免启动阶段触发500
     await refreshBag()
+    // 拉取土地预览
+    await fetchLandsPreview()
   }
 }
 
@@ -339,8 +421,10 @@ watch(currentAccountId, () => {
 })
 
 watch(() => status.value?.connection?.connected, (connected) => {
-  if (connected)
+  if (connected) {
     refreshBag(true)
+    fetchLandsPreview(true)
+  }
 })
 
 watch(() => JSON.stringify(status.value?.operations || {}), (next, prev) => {
@@ -646,44 +730,43 @@ async function handleDashboardTrialRenew() {
       </div>
     </div>
 
-    <!-- Main Content Flex -->
-    <div class="flex flex-1 flex-col items-stretch gap-6 md:flex-row md:overflow-hidden">
-      <!-- Logs (Left Column) -->
-      <div class="flex flex-1 flex-col gap-6 md:w-3/4 md:overflow-hidden">
-        <!-- Logs -->
-        <div class="glass-panel flex flex-1 flex-col rounded-lg p-6 shadow md:overflow-hidden">
-          <div class="mb-4 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <h3 class="glass-text-main flex items-center gap-2 text-lg font-medium">
+    <!-- Main Content Flex: 日志 40% + 右侧 60%（纵向分割：农场预览 + 今日统计） -->
+    <div class="flex flex-1 flex-col items-stretch gap-4 md:flex-row md:overflow-hidden">
+      <!-- 运行日志（左侧 40%） -->
+      <div class="flex flex-1 flex-col gap-4 md:w-[40%] md:min-w-0 md:overflow-hidden">
+        <div class="glass-panel flex flex-1 flex-col rounded-lg p-4 shadow md:overflow-hidden">
+          <div class="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <h3 class="glass-text-main flex items-center gap-2 text-base font-medium">
               <div class="i-carbon-document" />
               <span>运行日志</span>
             </h3>
 
-            <div class="flex flex-wrap items-center gap-2 text-sm">
+            <div class="flex flex-wrap items-center gap-1.5 text-sm">
               <BaseSelect
                 v-model="filter.module"
                 :options="modules"
-                class="w-32"
+                class="w-28"
                 @change="refresh"
               />
 
               <BaseSelect
                 v-model="filter.event"
                 :options="events"
-                class="w-32"
+                class="w-28"
                 @change="refresh"
               />
 
               <BaseSelect
                 v-model="filter.isWarn"
                 :options="logs"
-                class="w-32"
+                class="w-24"
                 @change="refresh"
               />
 
               <BaseInput
                 v-model="filter.keyword"
                 placeholder="关键词..."
-                class="w-32"
+                class="w-28"
                 clearable
                 @keyup.enter="refresh"
                 @clear="refresh"
@@ -710,41 +793,107 @@ async function handleDashboardTrialRenew() {
             </div>
           </div>
 
-          <div ref="logContainer" class="max-h-[50vh] min-h-0 flex-1 overflow-y-auto border border-gray-200/20 rounded bg-transparent p-4 text-sm leading-relaxed font-mono md:max-h-none dark:border-gray-700/20" @scroll="onLogScroll">
+          <div ref="logContainer" class="max-h-[50vh] min-h-0 flex-1 overflow-y-auto border border-gray-200/20 rounded bg-transparent p-3 text-xs leading-relaxed font-mono md:max-h-none dark:border-gray-700/20" @scroll="onLogScroll">
             <div v-if="!allLogs.length" class="glass-text-muted py-8 text-center">
               暂无日志
             </div>
             <div v-for="log in allLogs" :key="log.ts + log.msg" class="mb-1 break-all">
-              <span class="mr-2 select-none opacity-60">[{{ formatLogTime(log.time) }}]</span>
-              <span class="mr-2 rounded px-1.5 py-0.5 text-xs font-bold" :class="getLogTagClass(log.tag)">{{ log.tag }}</span>
-              <span v-if="log.meta?.event" class="mr-2 rounded bg-blue-50/50 px-1.5 py-0.5 text-xs text-blue-600 dark:bg-blue-900/30 dark:text-blue-300">{{ getEventLabel(log.meta.event) }}</span>
+              <span class="mr-1.5 select-none opacity-60">[{{ formatLogTime(log.time) }}]</span>
+              <span class="mr-1.5 rounded px-1 py-0.5 text-xs font-bold" :class="getLogTagClass(log.tag)">{{ log.tag }}</span>
+              <span v-if="log.meta?.event" class="mr-1.5 rounded bg-blue-50/50 px-1 py-0.5 text-xs text-blue-600 dark:bg-blue-900/30 dark:text-blue-300">{{ getEventLabel(log.meta.event) }}</span>
               <span :class="getLogMsgClass(log.tag)" class="glass-text-main opacity-90">{{ log.msg }}</span>
             </div>
           </div>
         </div>
       </div>
 
-      <!-- Right Column Stack -->
-      <div class="flex flex-col md:w-1/4 md:overflow-hidden">
-        <!-- Operations Grid -->
-        <div class="glass-panel min-h-0 flex flex-1 flex-col justify-start rounded-lg p-4 shadow md:h-full">
-          <h3 class="glass-text-main mb-4 flex shrink-0 items-center gap-2 text-lg font-medium">
+      <!-- 右侧面板（60%）：纵向分割 —— 农场预览 + 今日统计 -->
+      <div class="flex flex-col gap-4 md:w-[60%] md:min-w-0 md:overflow-hidden">
+        <!-- 农场操作预览 -->
+        <div class="glass-panel flex flex-1 flex-col rounded-lg p-4 shadow md:overflow-hidden">
+          <h3 class="glass-text-main mb-3 flex shrink-0 items-center gap-2 text-base font-medium">
+            <div class="i-carbon-sprout text-primary-500" />
+            <span>农场预览</span>
+            <span v-if="landsPreview?.summary" class="ml-auto flex items-center gap-2 text-xs font-normal">
+              <span class="rounded bg-green-100 px-1.5 py-0.5 text-green-700 dark:bg-green-900/30 dark:text-green-300">可收 {{ landsPreview.summary.harvestable || 0 }}</span>
+              <span class="rounded bg-blue-100 px-1.5 py-0.5 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300">生长 {{ landsPreview.summary.growing || 0 }}</span>
+              <span class="rounded bg-gray-100 px-1.5 py-0.5 text-gray-600 dark:bg-gray-700/30 dark:text-gray-400">空地 {{ landsPreview.summary.empty || 0 }}</span>
+              <span v-if="landsPreview.summary.dead" class="rounded bg-red-100 px-1.5 py-0.5 text-red-700 dark:bg-red-900/30 dark:text-red-300">枯萎 {{ landsPreview.summary.dead }}</span>
+            </span>
+          </h3>
+
+          <div v-if="!landsPreview || !unlockedLands.length" class="glass-text-muted flex flex-1 items-center justify-center py-6 text-center text-sm">
+            <div v-if="!status?.connection?.connected">
+              账号未连接，无法获取土地信息
+            </div>
+            <div v-else>
+              正在加载土地信息...
+            </div>
+          </div>
+
+          <div v-else class="custom-scrollbar grid min-h-0 flex-1 grid-cols-2 content-start gap-2 overflow-y-auto pr-1 lg:grid-cols-3 xl:grid-cols-4">
+            <div
+              v-for="land in unlockedLands"
+              :key="land.id"
+              class="flex flex-col rounded-lg border p-2.5 transition-colors"
+              :class="getLandStatusClass(land)"
+            >
+              <!-- 地块头部：编号 + 状态 -->
+              <div class="mb-1 flex items-center justify-between">
+                <span class="glass-text-muted text-[11px]">地块{{ land.id }}</span>
+                <span
+                  v-if="land.status === 'harvestable'"
+                  class="text-[11px] text-green-600 font-bold dark:text-green-400"
+                >✅ 可收获</span>
+                <span
+                  v-else-if="land.status === 'dead'"
+                  class="text-[11px] text-red-500 font-bold"
+                >💀 枯萎</span>
+                <span
+                  v-else-if="land.status === 'empty'"
+                  class="text-[11px] text-gray-400"
+                >空地</span>
+                <span
+                  v-else-if="(localMatureCountdowns[land.id] || 0) > 0"
+                  class="text-[11px] text-blue-600 font-mono dark:text-blue-400"
+                >⏳ {{ formatMatureTime(localMatureCountdowns[land.id] || 0) }}</span>
+                <span v-else class="text-[11px] text-blue-500 font-mono">⏳ --</span>
+              </div>
+
+              <!-- 作物名 -->
+              <div class="glass-text-main truncate text-sm font-medium" :title="land.plantName">
+                {{ land.plantName || (land.status === 'empty' ? '—' : '未知') }}
+              </div>
+
+              <!-- 异常标记 -->
+              <div v-if="land.needWater || land.needWeed || land.needBug" class="mt-1 flex flex-wrap gap-1">
+                <span v-if="land.needWater" class="rounded bg-blue-100 px-1 py-0.5 text-[10px] text-blue-600 dark:bg-blue-900/30 dark:text-blue-300">💧浇水</span>
+                <span v-if="land.needWeed" class="rounded bg-yellow-100 px-1 py-0.5 text-[10px] text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300">🌿除草</span>
+                <span v-if="land.needBug" class="rounded bg-red-100 px-1 py-0.5 text-[10px] text-red-600 dark:bg-red-900/30 dark:text-red-300">🐛除虫</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 今日统计（保持 2 列，压缩间距） -->
+        <div class="glass-panel flex shrink-0 flex-col rounded-lg p-4 shadow">
+          <h3 class="glass-text-main mb-3 flex shrink-0 items-center gap-2 text-base font-medium">
             <div class="i-carbon-chart-column" />
             <span>今日统计</span>
           </h3>
-          <div class="custom-scrollbar grid grid-cols-2 content-start gap-2 overflow-y-auto pr-1 2xl:gap-3">
+          <div class="grid grid-cols-2 content-start gap-1.5 lg:grid-cols-3 xl:grid-cols-4">
             <div
               v-for="(val, key) in (status?.operations || {})"
               :key="key"
-              class="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2 dark:bg-gray-700/30 2xl:px-4 2xl:py-3"
+              class="flex items-center justify-between rounded-lg bg-gray-50 px-2 py-1.5 dark:bg-gray-700/30"
             >
-              <div class="flex items-center gap-2">
-                <div class="text-base 2xl:text-lg" :class="[getOpIcon(key), getOpColor(key)]" />
-                <div class="glass-text-muted text-xs 2xl:text-sm">
+              <div class="flex items-center gap-1.5">
+                <div class="text-sm" :class="[getOpIcon(key), getOpColor(key)]" />
+                <div class="glass-text-muted text-xs">
                   {{ getOpName(key) }}
                 </div>
               </div>
-              <div class="text-sm font-bold 2xl:text-base">
+              <div class="text-sm font-bold">
                 {{ val }}
               </div>
             </div>
